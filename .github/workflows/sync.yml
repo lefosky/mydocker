@@ -4,13 +4,18 @@ on:
   workflow_dispatch:
     inputs:
       image:
-        description: '需要同步的镜像 (例如: nginx:latest 或 bitnami/redis:7.0)'
+        description: '需要同步的源镜像 (例如: nginx:latest 或 bitnami/redis:7.0)'
         required: true
         type: string
-
-env:
-  ALIYUN_REGISTRY: registry.cn-hangzhou.aliyuncs.com # 替换成你的地域地址
-  ALIYUN_NAMESPACE: my-docker-sync                   # 替换成你的命名空间
+      arch:
+        description: '镜像架构 (默认 amd64，如需 arm64 或 all 请修改)'
+        required: true
+        default: 'amd64'
+        type: choice
+        options:
+          - amd64
+          - arm64
+          - all
 
 jobs:
   sync:
@@ -18,22 +23,41 @@ jobs:
     steps:
       - name: Sync image via Skopeo
         env:
+          REGISTRY: ${{ secrets.ALIYUN_REGISTRY }}
+          NAMESPACE: ${{ secrets.ALIYUN_NAMESPACE }}
           DEST_USER: ${{ secrets.ALIYUN_REGISTRY_USER }}
           DEST_PASS: ${{ secrets.ALIYUN_REGISTRY_PASSWORD }}
+          SRC_IMAGE: ${{ github.event.inputs.image }}
+          ARCH: ${{ github.event.inputs.arch }}
         run: |
-          SRC_IMAGE="${{ github.event.inputs.image }}"
+          # 1. 处理镜像名：去掉可能包含的 docker.io/library/ 前缀，并将 / 替换为 -
+          CLEAN_IMAGE="${SRC_IMAGE#docker.io/}"
+          CLEAN_IMAGE="${CLEAN_IMAGE#library/}"
+          IMAGE_NAME=$(echo "$CLEAN_IMAGE" | sed 's/\//-/g')
           
-          # 处理镜像名：如果带斜杠（如 bitnami/redis:7.0），可以把斜杠替换成横杠，因为阿里云命名空间下不支持多级目录
-          IMAGE_NAME=$(echo "$SRC_IMAGE" | sed 's/\//-/g')
+          DEST_IMAGE="${REGISTRY}/${NAMESPACE}/${IMAGE_NAME}"
           
-          DEST_IMAGE="${ALIYUN_REGISTRY}/${ALIYUN_NAMESPACE}/${IMAGE_NAME}"
+          # 2. 处理架构参数
+          ARCH_FLAG=""
+          if [ "$ARCH" = "all" ]; then
+            ARCH_FLAG="--all"
+          else
+            ARCH_FLAG="--override-arch ${ARCH} --override-os linux"
+          fi
           
-          echo "Syncing docker://${SRC_IMAGE} -> docker://${DEST_IMAGE}"
+          echo "🚀 开始同步: ${SRC_IMAGE} (架构: ${ARCH})..."
           
-          skopeo copy --insecure-policy \
+          # 3. 执行 Skopeo 同步
+          skopeo copy --insecure-policy $ARCH_FLAG \
             --dest-creds "${DEST_USER}:${DEST_PASS}" \
             "docker://${SRC_IMAGE}" \
             "docker://${DEST_IMAGE}"
             
-          echo "✅ 同步完成！国内拉取命令："
-          echo "docker pull ${DEST_IMAGE}"
+          echo "=========================================="
+          echo "✅ 同步成功！"
+          echo "转换后的镜像名后缀为: ${IMAGE_NAME}"
+          echo "请在你的服务器上执行以下命令拉取并还原原名："
+          echo ""
+          echo "docker pull <你的阿里云地址>/<你的命名空间>/${IMAGE_NAME}"
+          echo "docker tag <你的阿里云地址>/<你的命名空间>/${IMAGE_NAME} ${SRC_IMAGE}"
+          echo "=========================================="
